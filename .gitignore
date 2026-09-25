@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# frames: hosted separately (GitHub Pages), see NEXT_PUBLIC_FRAMES_URL
+/public/frames/
+/public/frames_webp/
+/public/hero-reference.png

@@ -1,26 +1,169 @@
 @import "tailwindcss";
+@import "lenis/dist/lenis.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* Landscape viewport: the cover-scaled frame keeps the samurai left of center and the right side free.
+   Keyed to shape, not width, so narrow-but-landscape windows get the side layout too. */
+@custom-variant wide (@media (min-aspect-ratio: 6/5) and (min-width: 560px));
+
+/* Palette: sumi ink, washi bone, and one vermilion (shu) reserved for seals and moments of consequence */
+@theme {
+  --color-ink: #0b0a09;
+  --color-sumi: #16130f;
+  --color-bone: #efe7d7;
+  --color-ash: #b3a894;
+  --color-shu: #e0462b;
+  --color-shu-deep: #b3301b;
+  --font-mincho: var(--nf-mincho), "Yu Mincho", "Hiragino Mincho ProN", serif;
+  --font-gothic: var(--nf-gothic), "Yu Gothic", "Hiragino Sans", sans-serif;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+@layer base {
+  html {
+    background-color: var(--color-ink);
+    color: var(--color-bone);
+    font-family: var(--font-gothic);
+    overflow-x: clip; /* not hidden: hidden makes a scroll container and breaks position: sticky */
+    scrollbar-color: #3a332b var(--color-ink);
+  }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  html.lenis, html.lenis body {
+    height: auto;
+  }
+
+  .lenis.lenis-smooth {
+    scroll-behavior: auto !important;
+  }
+
+  .lenis.lenis-smooth [data-lenis-prevent] {
+    overscroll-behavior: contain;
+  }
+
+  .lenis.lenis-stopped {
+    overflow: hidden;
+  }
+
+  .lenis.lenis-smooth iframe {
+    pointer-events: none;
+  }
+
+  body {
+    background-color: var(--color-ink);
+    color: var(--color-bone);
+    overflow-x: clip;
+    min-height: 100dvh;
+  }
+
+  ::selection {
+    background: var(--color-shu);
+    color: var(--color-bone);
+  }
+
+  :focus-visible {
+    outline: 1px solid var(--color-bone);
+    outline-offset: 4px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--color-ink);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #3a332b;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-shu);
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scrollCue {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(200%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+@layer components {
+  /* Legibility over the live film: soft ink bleed under the letters. Own compositor layer so the
+     blur is rasterized once instead of repainted every scroll frame while GSAP moves the text. */
+  .ink-shadow {
+    text-shadow: 0 2px 18px rgb(8 6 5 / 0.9), 0 0 42px rgb(8 6 5 / 0.65);
+    will-change: transform;
+  }
+
+  /* Sumi wash: a soft pool of ink under a text column so copy reads over the sun and the blade.
+     Lives on the column itself, so it enters and exits with the words. */
+  .wash {
+    isolation: isolate;
+  }
+  .wash::before {
+    content: "";
+    position: absolute;
+    inset: -18% -14% -22% -22%;
+    z-index: -1;
+    pointer-events: none;
+    background: radial-gradient(ellipse 60% 55% at 45% 55%, rgb(8 6 5 / 0.62), rgb(8 6 5 / 0.28) 55%, transparent 78%);
+    filter: blur(24px);
+  }
+
+  /* Monumental headline: heavy Mincho, mixed weights carry emphasis instead of extra colours */
+  .display {
+    font-family: var(--font-mincho);
+    font-weight: 900;
+    line-height: 1.04;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+  }
+
+  /* Reading text: sentence case, generous leading, short measure */
+  .lede {
+    font-family: var(--font-gothic);
+    font-size: clamp(0.9375rem, 0.3vw + 0.85rem, 1.0625rem);
+    line-height: 1.8;
+    color: rgb(239 231 215 / 0.86);
+    max-width: 38ch;
+    text-wrap: pretty;
+  }
+
+  /* Small margin notes, the only tracked caps on the page */
+  .note {
+    font-family: var(--font-gothic);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: var(--color-ash);
+  }
+
+  /* Vertical inscription, read top to bottom like a hanging scroll */
+  .tategaki {
+    writing-mode: vertical-rl;
+    font-family: var(--font-mincho);
+    letter-spacing: 0.3em;
+  }
+
+  /* Hanko seal: vermilion field, characters knocked out in bone */
+  .seal {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-shu);
+    color: var(--color-bone);
+    font-family: var(--font-mincho);
+    font-weight: 900;
+    line-height: 1;
+    border-radius: 3px;
+    box-shadow: inset 0 0 0 2px rgb(11 10 9 / 0.12), 0 6px 18px rgb(8 6 5 / 0.5);
+  }
 }
