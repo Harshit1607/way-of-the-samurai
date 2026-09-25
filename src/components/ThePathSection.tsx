@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import Inscription from "./Inscription";
+import Inscription, { revealOnEnter, exitOnLeave } from "./Inscription";
 
 export default function ThePathSection() {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -18,13 +18,8 @@ export default function ThePathSection() {
 
     const ctx = gsap.context(() => {
       // 1. Initial entrance of tag, body, and tags
-      const enterTl = gsap.timeline({
-        scrollTrigger: {
-          trigger: containerRef.current,
-          start: "top 65%",
-          toggleActions: "play none none reverse",
-        },
-      });
+      const enterTl = gsap.timeline({ paused: true });
+      revealOnEnter(enterTl, containerRef.current!, "top 65%");
 
       enterTl
         .fromTo(
@@ -53,28 +48,18 @@ export default function ThePathSection() {
       scrubTl
         .fromTo(
           titlePathRef.current,
-          { scale: 0.85, y: 35, opacity: 0.4 },
-          { scale: 1, y: 0, opacity: 1, ease: "none" }
+          { scale: 0.85, opacity: 0.4 },
+          { scale: 1, opacity: 1, ease: "none" }
         )
         .fromTo(
           titleDemandsRef.current,
-          { letterSpacing: "0.4em", opacity: 0.4 },
+          { letterSpacing: "0.12em", opacity: 0.4 },
           { letterSpacing: "0em", opacity: 1, ease: "none" },
           "<"
         );
 
       // 3. Section exit transition
-      gsap.to(contentWrapperRef.current, {
-        y: -100,
-        opacity: 0,
-        ease: "power2.inOut",
-        scrollTrigger: {
-          trigger: containerRef.current,
-          start: "60% top",
-          end: "bottom top",
-          scrub: true,
-        },
-      });
+      exitOnLeave(contentWrapperRef.current, containerRef.current);
     }, containerRef);
 
     return () => ctx.revert();
@@ -83,9 +68,9 @@ export default function ThePathSection() {
   return (
     <section
       ref={containerRef}
-      className="relative min-h-[175vh] w-full select-none bg-transparent overflow-clip"
+      className="relative min-h-[175vh] w-full bg-transparent overflow-clip"
     >
-      <div className="sticky top-0 flex h-dvh w-full flex-col justify-end px-6 pb-14 wide:justify-start wide:px-[4.5vw] wide:pb-0 wide:pt-24">
+      <div className="sticky top-0 flex h-dvh w-full flex-col justify-end px-6 pb-[max(3.5rem,calc(env(safe-area-inset-bottom)+2rem))] wide:justify-start wide:px-[4.5vw] wide:pb-0 wide:pt-24">
         <div
           ref={contentWrapperRef}
           className="wash relative z-10 flex items-start gap-6 wide:ml-auto wide:w-[36vw] wide:gap-10"
@@ -102,7 +87,7 @@ export default function ThePathSection() {
             {/* Demands everything: tracking tightens as the blade leaves the scabbard */}
             <p
               ref={titleDemandsRef}
-              className="mt-2 font-mincho text-3xl font-normal leading-tight text-bone ink-shadow sm:text-5xl wide:text-[clamp(1.1rem,2.5vw,3.25rem)]"
+              className="mt-2 font-mincho wide:whitespace-nowrap text-3xl font-normal leading-tight text-bone ink-shadow sm:text-5xl wide:text-[clamp(1.1rem,2.5vw,3.25rem)]"
             >
               demands everything.
             </p>
@@ -119,7 +104,7 @@ export default function ThePathSection() {
               className="note mt-8 flex flex-wrap gap-x-6 gap-y-2 text-bone ink-shadow"
             >
               {["Focus", "Precision", "Zero wasted effort"].map((t) => (
-                <li key={t} className="flex items-center gap-2.5 before:h-1 before:w-1 before:bg-shu">
+                <li key={t} className="flex items-center gap-2.5 before:h-1 before:w-1 before:bg-bone/60">
                   {t}
                 </li>
               ))}

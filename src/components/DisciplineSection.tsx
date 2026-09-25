@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import Inscription, { BRUSH_FROM, BRUSH_TO } from "./Inscription";
+import Inscription, { BRUSH_FROM, BRUSH_TO, revealOnEnter, exitOnLeave } from "./Inscription";
 
 export default function DisciplineSection() {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -17,13 +17,8 @@ export default function DisciplineSection() {
 
     const ctx = gsap.context(() => {
       // Opposing directional entrance choreographed with samurai preparing stance
-      const tl = gsap.timeline({
-        scrollTrigger: {
-          trigger: containerRef.current,
-          start: "top 60%",
-          toggleActions: "play none none reverse",
-        },
-      });
+      const tl = gsap.timeline({ paused: true });
+      revealOnEnter(tl, containerRef.current!);
 
       // DISCIPLINE enters from the LEFT
       tl.fromTo(
@@ -47,17 +42,7 @@ export default function DisciplineSection() {
         );
 
       // Section exit transition
-      gsap.to(contentWrapperRef.current, {
-        y: -100,
-        opacity: 0,
-        ease: "power2.inOut",
-        scrollTrigger: {
-          trigger: containerRef.current,
-          start: "60% top",
-          end: "bottom top",
-          scrub: true,
-        },
-      });
+      exitOnLeave(contentWrapperRef.current, containerRef.current);
     }, containerRef);
 
     return () => ctx.revert();
@@ -66,9 +51,9 @@ export default function DisciplineSection() {
   return (
     <section
       ref={containerRef}
-      className="relative min-h-[175vh] w-full select-none bg-transparent overflow-clip"
+      className="relative min-h-[175vh] w-full bg-transparent overflow-clip"
     >
-      <div className="sticky top-0 flex h-dvh w-full flex-col justify-end px-6 pb-14 wide:px-[4.5vw] wide:pb-20">
+      <div className="sticky top-0 flex h-dvh w-full flex-col justify-end px-6 pb-[max(3.5rem,calc(env(safe-area-inset-bottom)+2rem))] wide:px-[4.5vw] wide:pb-20">
         <div
           ref={contentWrapperRef}
           className="wash relative z-10 flex items-end gap-6 wide:ml-auto wide:w-[36vw] wide:gap-10"

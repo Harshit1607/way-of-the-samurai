@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Zen_Old_Mincho, Zen_Kaku_Gothic_New } from "next/font/google";
 import "./globals.css";
 
@@ -21,6 +21,9 @@ export const metadata: Metadata = {
     "A continuous cinematic scroll film exploring honour, discipline, strength, silence, and precision through the art of the blade.",
   keywords: ["Samurai", "Katana", "Cinematic Experience", "The Jade Samurai", "Tanjo", "Bushido"],
 };
+
+// cover: lets bottom-anchored copy read env(safe-area-inset-bottom) on notched phones
+export const viewport: Viewport = { viewportFit: "cover", themeColor: "#0b0a09" };
 
 export default function RootLayout({
   children,

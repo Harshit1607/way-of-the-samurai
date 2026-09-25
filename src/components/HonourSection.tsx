@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import Inscription, { BRUSH_FROM, BRUSH_TO } from "./Inscription";
+import Inscription, { BRUSH_FROM, BRUSH_TO, revealOnEnter, exitOnLeave } from "./Inscription";
 
 export default function HonourSection() {
   const sectionRef = useRef<HTMLDivElement | null>(null);
@@ -19,13 +19,8 @@ export default function HonourSection() {
 
     const ctx = gsap.context(() => {
       // Staggered masked reveals as samurai begins moving in background
-      const tl = gsap.timeline({
-        scrollTrigger: {
-          trigger: sectionRef.current,
-          start: "top 60%",
-          toggleActions: "play none none reverse",
-        },
-      });
+      const tl = gsap.timeline({ paused: true });
+      revealOnEnter(tl, sectionRef.current!);
 
       // 0.00s: HONOUR enters from below mask
       tl.fromTo(
@@ -62,17 +57,7 @@ export default function HonourSection() {
         );
 
       // Section exit transition: floats upward as Discipline enters
-      gsap.to(contentWrapperRef.current, {
-        y: -100,
-        opacity: 0,
-        ease: "power2.inOut",
-        scrollTrigger: {
-          trigger: sectionRef.current,
-          start: "60% top",
-          end: "bottom top",
-          scrub: true,
-        },
-      });
+      exitOnLeave(contentWrapperRef.current, sectionRef.current);
     }, sectionRef);
 
     return () => ctx.revert();
@@ -81,9 +66,9 @@ export default function HonourSection() {
   return (
     <section
       ref={sectionRef}
-      className="relative min-h-[175vh] w-full select-none bg-transparent"
+      className="relative min-h-[175vh] w-full bg-transparent"
     >
-      <div className="sticky top-0 flex h-dvh w-full flex-col justify-end px-6 pb-14 wide:px-[4.5vw] wide:pb-20">
+      <div className="sticky top-0 flex h-dvh w-full flex-col justify-end px-6 pb-[max(3.5rem,calc(env(safe-area-inset-bottom)+2rem))] wide:px-[4.5vw] wide:pb-20">
         <div
           ref={contentWrapperRef}
           className="wash relative z-10 flex items-end gap-6 wide:ml-auto wide:w-[36vw] wide:gap-10"
@@ -109,7 +94,7 @@ export default function HonourSection() {
 
             {/* The chapter's one quotation, hung from a short vermilion rule */}
             <figure ref={quoteRef} className="mt-8 flex gap-4">
-              <span className="mt-[0.7em] h-px w-8 shrink-0 bg-shu" />
+              <span className="mt-[0.7em] h-px w-8 shrink-0 bg-bone/40" />
               <blockquote className="font-mincho text-base leading-relaxed text-bone ink-shadow wide:text-lg">
                 &ldquo;A warrior with no honour is merely a blade without a hand.&rdquo;
               </blockquote>

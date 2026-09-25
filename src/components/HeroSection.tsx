@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import Inscription, { BRUSH_FROM, BRUSH_TO } from "./Inscription";
+import Inscription, { BRUSH_FROM, BRUSH_TO, exitOnLeave, onCurtainLift } from "./Inscription";
 
 export default function HeroSection() {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -18,9 +18,11 @@ export default function HeroSection() {
   useEffect(() => {
     gsap.registerPlugin(ScrollTrigger);
 
+    let offCurtain = () => {};
     const ctx = gsap.context(() => {
-      // 1. Initial Opening Title Sequence (Masked Rising Reveal)
-      const tl = gsap.timeline({ delay: 0.3 });
+      // 1. Opening title sequence: held until the preloader curtain lifts, so it plays in view
+      const tl = gsap.timeline({ paused: true });
+      offCurtain = onCurtainLift(() => tl.play());
 
       tl.fromTo(
         badgeRef.current,
@@ -41,17 +43,11 @@ export default function HeroSection() {
           { ...BRUSH_TO, duration: 1.3, ease: "power2.out" },
           "-=0.9"
         )
-        // Subtitle: HONOUR · DISCIPLINE · PRECISION (Letter spacing compression)
+        // Subtitle: the three virtues come into focus (blur, not letter-spacing, so nothing reflows)
         .fromTo(
           subtitleRef.current,
-          { opacity: 0, y: 20, letterSpacing: "0.6em" },
-          {
-            opacity: 1,
-            y: 0,
-            letterSpacing: "0.28em",
-            duration: 1.4,
-            ease: "power2.out",
-          },
+          { opacity: 0, y: 12, filter: "blur(4px)" },
+          { opacity: 1, y: 0, filter: "blur(0px)", duration: 1.1, ease: "power3.out" },
           "-=0.7"
         )
         .fromTo(
@@ -59,23 +55,14 @@ export default function HeroSection() {
           { opacity: 0, y: 20 },
           { opacity: 0.85, y: 0, duration: 1.1, ease: "power2.out" },
           "-=0.8"
-        );
+        )
+        // 3. Scroll cue arrives once the title has settled
+        .fromTo(cueRef.current, { opacity: 0 }, { opacity: 1, duration: 0.8 }, "-=0.3");
 
-      // 2. Scroll Exit Choreography: Smooth upward editorial exit as user scrolls into Honour
-      gsap.to(contentWrapperRef.current, {
-        y: -100,
-        opacity: 0,
-        ease: "power2.inOut",
-        scrollTrigger: {
-          trigger: containerRef.current,
-          start: "60% top",
-          end: "bottom top",
-          scrub: true,
-        },
-      });
+      // 2. Exit: gone before Honour's entrance fires
+      exitOnLeave(contentWrapperRef.current, containerRef.current);
 
-      // 3. Scroll cue appears after the title sequence and fades on the first bit of scroll
-      gsap.fromTo(cueRef.current, { opacity: 0 }, { opacity: 1, duration: 1, delay: 2.6 });
+      // Scroll cue fades on the first bit of scroll
       gsap.to(cueRef.current, {
         opacity: 0,
         immediateRender: false,
@@ -88,13 +75,16 @@ export default function HeroSection() {
       });
     }, containerRef);
 
-    return () => ctx.revert();
+    return () => {
+      offCurtain();
+      ctx.revert();
+    };
   }, []);
 
   return (
     <section
       ref={containerRef}
-      className="relative min-h-[160vh] w-full select-none bg-transparent"
+      className="relative min-h-[160vh] w-full bg-transparent"
     >
       <div className="sticky top-0 flex h-dvh w-full flex-col justify-between px-6 py-7 wide:px-[4.5vw] wide:py-10">
         {/* Masthead: seal emblem and colophon, a hairline under it like a scroll's upper border */}
@@ -108,7 +98,7 @@ export default function HeroSection() {
               <span className="note">Chronicles, vol. 1</span>
             </div>
           </div>
-          <span className="note hidden wide:block">
+          <span className="note">
             Kyoto <span className="tabular-nums text-bone">1642</span>
           </span>
         </header>
@@ -142,7 +132,7 @@ export default function HeroSection() {
             </p>
           </div>
 
-          <Inscription seal="序" kanji="武士道" reading="Bushidō" delay={1.1} />
+          <Inscription seal="序" kanji="武士道" reading="Bushidō" onCurtain />
         </div>
 
         {/* Scroll cue: a single ink drip down a hairline */}

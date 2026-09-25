@@ -33,6 +33,9 @@ export default function Preloader({ onLoaded }: PreloaderProps) {
       if (isTransitionTriggered) return;
       isTransitionTriggered = true;
       setHasStartedTransition(true);
+      // The hero title waits for this so it plays in view, not behind the curtain
+      (window as unknown as { __curtainLifted?: boolean }).__curtainLifted = true;
+      window.dispatchEvent(new Event("curtain-lift"));
       setTimeout(() => {
         setIsDone(true);
       }, 700);
@@ -105,8 +108,7 @@ export default function Preloader({ onLoaded }: PreloaderProps) {
 
   return (
     <div
-      role="status"
-      className={`fixed inset-0 z-50 flex items-center justify-center bg-ink transition-[opacity,translate] duration-700 ease-out select-none ${
+      className={`fixed inset-0 z-50 flex items-center justify-center bg-ink transition-[opacity,translate] duration-700 ease-curtain select-none ${
         hasStartedTransition ? "pointer-events-none -translate-y-full opacity-0" : "opacity-100"
       }`}
     >
@@ -135,7 +137,11 @@ export default function Preloader({ onLoaded }: PreloaderProps) {
             <span className="font-mincho text-lg font-bold text-bone">Honour has no shortcut</span>
             <span className="note">The Jade Samurai · vol. 1</span>
           </div>
-          <span className="note tabular-nums text-bone">
+          {/* One announcement for screen readers instead of a digit per frame */}
+          <span role="status" className="sr-only">
+            {progress >= 100 ? "The film is ready" : "Loading the film"}
+          </span>
+          <span aria-hidden="true" className="note tabular-nums text-bone">
             {progress.toString().padStart(3, "0")}
             <span className="text-ash"> / 100</span>
           </span>

@@ -3,11 +3,12 @@
 import { useEffect, useRef } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import Inscription from "./Inscription";
+import Inscription, { revealOnEnter, exitOnLeave } from "./Inscription";
 
 export default function StrikeSection() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const slashLineRef = useRef<HTMLDivElement | null>(null);
+  const glintRef = useRef<HTMLSpanElement | null>(null);
   const textLeftRef = useRef<HTMLHeadingElement | null>(null);
   const textRightRef = useRef<HTMLHeadingElement | null>(null);
   const subtextRef = useRef<HTMLParagraphElement | null>(null);
@@ -17,18 +18,15 @@ export default function StrikeSection() {
   useEffect(() => {
     gsap.registerPlugin(ScrollTrigger);
 
-    // Headlines already span the full width on phones, so drifting them apart would push them off-screen
-    const drift = window.innerWidth < 768 ? 0 : 40;
+    // How far the two halves part after the cut. Phones get a small split so nothing leaves the screen.
+    const wide = window.innerWidth >= 768;
+    const partLeft = wide ? 56 : 10;
+    const partRight = wide ? 20 : 10;
 
     const ctx = gsap.context(() => {
       // 1. Initial Entrance of text and badge
-      const tl = gsap.timeline({
-        scrollTrigger: {
-          trigger: containerRef.current,
-          start: "top 60%",
-          toggleActions: "play none none reverse",
-        },
-      });
+      const tl = gsap.timeline({ paused: true });
+      revealOnEnter(tl, containerRef.current!);
 
       tl.fromTo(
         textLeftRef.current,
@@ -54,58 +52,20 @@ export default function StrikeSection() {
           "-=0.6"
         );
 
-      // 2. High-Impact Visual Split & Katana Slash choreographed 1:1 with the attack frame:
-      // Slicing divider lines open, ONE MOVEMENT drifts left, ONE DECISION drifts right as user scrubs into the strike
-      gsap.fromTo(
-        slashLineRef.current,
-        { scaleX: 0, opacity: 0 },
-        {
-          scaleX: 1,
-          opacity: 1,
-          ease: "expo.out",
-          scrollTrigger: {
-            trigger: containerRef.current,
-            start: "15% top",
-            end: "55% top",
-            scrub: 0.5,
-          },
-        }
-      );
-
-      gsap.to(textLeftRef.current, {
-        x: -drift,
-        ease: "power2.out",
-        scrollTrigger: {
-          trigger: containerRef.current,
-          start: "15% top",
-          end: "65% top",
-          scrub: true,
-        },
-      });
-
-      gsap.to(textRightRef.current, {
-        x: drift,
-        ease: "power2.out",
-        scrollTrigger: {
-          trigger: containerRef.current,
-          start: "15% top",
-          end: "65% top",
-          scrub: true,
-        },
-      });
+      // 2. The cut: the page's only sharp motion. Once the strike is in frame the blade line crosses the
+      // column in 180ms, a glint flares and dies, and the sentence parts along the cut. Scrolling back
+      // above it un-cuts, faster (revealOnEnter rewinds at 3x).
+      const cut = gsap.timeline({ paused: true });
+      revealOnEnter(cut, containerRef.current!, "8% top");
+      cut
+        .fromTo(slashLineRef.current, { scaleX: 0 }, { scaleX: 1, duration: 0.18, ease: "power4.out" })
+        .fromTo(glintRef.current, { opacity: 0 }, { opacity: 1, duration: 0.06, ease: "none" }, 0.1)
+        .to(glintRef.current, { opacity: 0, duration: 0.5, ease: "power2.out" })
+        .to(textLeftRef.current, { x: -partLeft, duration: 0.6, ease: "power4.out" }, 0.12)
+        .to(textRightRef.current, { x: partRight, duration: 0.6, ease: "power4.out" }, 0.12);
 
       // Section exit transition
-      gsap.to(contentWrapperRef.current, {
-        y: -100,
-        opacity: 0,
-        ease: "power2.inOut",
-        scrollTrigger: {
-          trigger: containerRef.current,
-          start: "60% top",
-          end: "bottom top",
-          scrub: true,
-        },
-      });
+      exitOnLeave(contentWrapperRef.current, containerRef.current);
     }, containerRef);
 
     return () => ctx.revert();
@@ -114,7 +74,7 @@ export default function StrikeSection() {
   return (
     <section
       ref={containerRef}
-      className="relative min-h-[175vh] w-full select-none bg-transparent overflow-clip"
+      className="relative min-h-[175vh] w-full bg-transparent overflow-clip"
     >
       <div className="sticky top-0 flex h-dvh w-full flex-col justify-center px-6 wide:justify-start wide:px-[4.5vw] wide:pt-20">
         <div
@@ -131,11 +91,13 @@ export default function StrikeSection() {
                 One movement.
               </h2>
 
-              {/* The cut: a hairline of steel with vermilion at the edge. The answer stays bone: vermilion vanishes into the sun here */}
+              {/* The cut: a bone-white blade line, slightly off true like a real slash, with a glint that flares once */}
               <div
                 ref={slashLineRef}
-                className="my-5 h-[2px] w-full origin-left bg-linear-to-r from-shu via-bone/80 to-transparent will-change-transform"
-              />
+                className="relative my-5 h-[2px] w-full origin-left -rotate-[3deg] rounded-full bg-bone shadow-[0_0_14px_rgb(239_231_215/0.55)] will-change-transform"
+              >
+                <span ref={glintRef} className="absolute -inset-y-2 inset-x-0 rounded-full bg-bone/80 opacity-0 blur-md" />
+              </div>
 
               <h2
                 ref={textRightRef}
@@ -151,8 +113,8 @@ export default function StrikeSection() {
               decided before the steel caught the light.
             </p>
 
-            <p ref={badgeRef} className="note mt-6 ink-shadow">
-              <span lang="ja-Latn" className="text-bone">Ichigeki hissatsu</span> — one blade, one life
+            <p ref={badgeRef} className="mt-6 text-sm text-bone/75 ink-shadow">
+              <span lang="ja-Latn" className="font-mincho text-base text-bone">Ichigeki hissatsu</span>, one blade, one life
             </p>
           </div>
 
