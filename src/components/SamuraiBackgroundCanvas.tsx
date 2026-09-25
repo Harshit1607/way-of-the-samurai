@@ -23,12 +23,25 @@ export default function SamuraiBackgroundCanvas({
   const targetProgressRef = useRef(0);
   const currentProgressRef = useRef(0);
   const isRunningRef = useRef(false);
+  // Redraws the resting frame if the frame that just loaded is on screen (set by the canvas effect below)
+  const onFrameLoadRef = useRef<(index: number) => void>(() => {});
 
-  // Frames come from the Preloader's staged stream (first 100 eagerly, rest in batches)
+  // Frames come from the Preloader's staged stream (first 100 eagerly, rest in batches).
+  // The canvas only draws on scroll/resize, so without this the first frame (and any frame that
+  // streams in after a fast scroll) never paints until the user scrolls.
   useEffect(() => {
-    if (cachedImages && cachedImages.length > 0) {
-      imagesRef.current = cachedImages;
-    }
+    if (!cachedImages || cachedImages.length === 0) return;
+    imagesRef.current = cachedImages;
+
+    const listeners = cachedImages.map((img, i) => {
+      const onLoad = () => onFrameLoadRef.current(i);
+      img.addEventListener("load", onLoad);
+      return () => img.removeEventListener("load", onLoad);
+    });
+    // Some frames may have decoded (or come from cache) before these listeners existed
+    onFrameLoadRef.current(-1);
+
+    return () => listeners.forEach((off) => off());
   }, [cachedImages]);
 
   useEffect(() => {
@@ -154,13 +167,17 @@ export default function SamuraiBackgroundCanvas({
       renderInterpolatedFrame(currentProgressRef.current);
     };
 
+    // -1 means "just redraw"; otherwise only redraw when the loaded frame is one of the two being blended
+    onFrameLoadRef.current = (index: number) => {
+      if (isRunningRef.current) return; // the lerp loop is already drawing every frame
+      const frameA = Math.floor(currentProgressRef.current * (framesList.length - 1));
+      if (index === -1 || index === frameA || index === frameA + 1) {
+        renderInterpolatedFrame(currentProgressRef.current);
+      }
+    };
+
     handleResize();
     window.addEventListener("resize", handleResize);
-
-    // Initial render of Frame 001
-    const initialTimer = setTimeout(() => {
-      renderInterpolatedFrame(0);
-    }, 60);
 
     const updateTargetProgress = (progress: number) => {
       targetProgressRef.current = Math.min(1, Math.max(0, progress));
@@ -188,7 +205,7 @@ export default function SamuraiBackgroundCanvas({
     });
 
     return () => {
-      clearTimeout(initialTimer);
+      onFrameLoadRef.current = () => {};
       window.removeEventListener("resize", handleResize);
       window.removeEventListener("lenis-scroll", handleLenisScroll);
       st.kill();
