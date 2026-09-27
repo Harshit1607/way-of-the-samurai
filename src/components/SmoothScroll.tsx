@@ -21,15 +21,15 @@ export default function SmoothScroll({
     if (reduceMotion) gsap.globalTimeline.timeScale(1000);
 
     const lenis = new Lenis({
-      duration: 2.0, // High-end cinematic scroll duration with sustained momentum
+      duration: 2.2, // Ultra-luxurious cinematic scroll inertia
       easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
       orientation: "vertical",
       gestureOrientation: "vertical",
       smoothWheel: !reduceMotion,
-      wheelMultiplier: 0.8, // Calibrated wheel sensitivity to prevent sudden frame jumps
-      touchMultiplier: 1.6,
+      wheelMultiplier: 0.85,
+      touchMultiplier: 1.5,
       syncTouch: true,
-      syncTouchLerp: 0.08,
+      syncTouchLerp: 0.09,
       autoRaf: false,
     });
 

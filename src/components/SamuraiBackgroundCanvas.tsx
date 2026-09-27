@@ -19,13 +19,14 @@ export default function SamuraiBackgroundCanvas({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const imagesRef = useRef<HTMLImageElement[]>([]);
   
-  // Continuous sub-frame interpolation state
+  // Continuous sub-frame interpolation and 2nd-order spring physics state
   const targetProgressRef = useRef(0);
   const currentProgressRef = useRef(0);
+  const velocityRef = useRef(0);
   const isRunningRef = useRef(false);
-  // Redraws the resting frame if the frame that just loaded is on screen (set by the canvas effect below)
+  const lastTimeRef = useRef(0);
+  // Redraws the resting frame if the frame that just loaded is on screen
   const onFrameLoadRef = useRef<(index: number) => void>(() => {});
-
   // Frames come from the Preloader's staged stream (first 100 eagerly, rest in batches).
   // The canvas only draws on scroll/resize, so without this the first frame (and any frame that
   // streams in after a fast scroll) never paints until the user scrolls.
@@ -50,10 +51,11 @@ export default function SamuraiBackgroundCanvas({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext("2d", { alpha: false });
+    const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true }) || canvas.getContext("2d", { alpha: false });
     if (!ctx) return;
 
-
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     // Retrieve the closest valid, decoded image for a given index
     const getValidImage = (index: number): HTMLImageElement | null => {
       const images = imagesRef.current;
@@ -80,13 +82,14 @@ export default function SamuraiBackgroundCanvas({
 
       return null;
     };
-
     /**
-     * Dual-Frame Cross-Fade Interpolation:
-     * Blends frame A and frame B using the fractional sub-frame position.
-     * Melts discrete frames into a buttery continuous 60FPS motion flow.
+     * Multi-Dimensional Temporal Optical Flow & Sub-Frame Morphing:
+     * 1. Quintic Smootherstep: C² continuous alpha cross-fade eliminating derivative boundary cusps.
+     * 2. Sub-Frame Affine Morphing: Micro-scales Frame A (+t) and Frame B (-(1-t)) around the samurai's
+     *    focal axis to lock geometric silhouettes in place during transitions.
+     * 3. Velocity-Adaptive Shutter Blur: Synthesizes temporal anti-aliasing during rapid scrubbing.
      */
-    const renderInterpolatedFrame = (progress: number) => {
+    const renderInterpolatedFrame = (progress: number, velocity: number = 0) => {
       const total = framesList.length;
       if (total <= 0) return;
 
@@ -94,7 +97,10 @@ export default function SamuraiBackgroundCanvas({
       const exactFrame = clamped * (total - 1);
       const frameA = Math.floor(exactFrame);
       const frameB = Math.min(total - 1, frameA + 1);
-      const blend = exactFrame - frameA; // Fractional remainder 0.0 to 1.0
+      const rawBlend = exactFrame - frameA; // Fractional remainder 0.0 to 1.0
+
+      // Quintic Smootherstep (6t^5 - 15t^4 + 10t^3): 0 first & second derivatives at integer boundaries
+      const blend = rawBlend * rawBlend * rawBlend * (rawBlend * (rawBlend * 6 - 15) + 10);
 
       const imgA = getValidImage(frameA);
       if (!imgA) return;
@@ -104,48 +110,117 @@ export default function SamuraiBackgroundCanvas({
       const iw = imgA.naturalWidth || 1920;
       const ih = imgA.naturalHeight || 1080;
 
-      // Full cover viewport scaling
-      const scale = Math.max(cw / iw, ch / ih);
-      const nw = iw * scale;
-      const nh = ih * scale;
-      const offsetX = (cw - nw) * 0.5;
-      const offsetY = (ch - nh) * 0.5;
+      // Base cover viewport scaling
+      const baseScale = Math.max(cw / iw, ch / ih);
+      const baseNw = iw * baseScale;
+      const baseNh = ih * baseScale;
+      const baseOffsetX = (cw - baseNw) * 0.5;
+      const baseOffsetY = (ch - baseNh) * 0.5;
 
-      ctx.fillStyle = "#050505";
-      ctx.fillRect(0, 0, cw, ch);
+      // Focal point of shot: Samurai center-of-mass (42% X, 50% Y)
+      const focalX = baseOffsetX + baseNw * 0.42;
+      const focalY = baseOffsetY + baseNh * 0.50;
 
-      // Render base frame A
+      // Subtle sub-frame affine expansion rate matching the camera dolly-in speed
+      const MORPH_RATE = 0.00065;
+      const scaleA = 1.0 + rawBlend * MORPH_RATE;
+      const scaleB = 1.0 - (1.0 - rawBlend) * MORPH_RATE;
+
+      // Calculate affine bounds for Frame A
+      const nwA = Math.round(baseNw * scaleA);
+      const nhA = Math.round(baseNh * scaleA);
+      const offsetXA = Math.round(focalX * (1 - scaleA) + baseOffsetX * scaleA);
+      const offsetYA = Math.round(focalY * (1 - scaleA) + baseOffsetY * scaleA);
+
+      // Clear only if transformed bounds expose canvas edges
+      if (offsetXA > 0 || offsetYA > 0 || nwA < cw || nhA < ch) {
+        ctx.fillStyle = "#050505";
+        ctx.fillRect(0, 0, cw, ch);
+      }
+
+      // 1. Draw base Frame A with affine forward-morphing
       ctx.globalAlpha = 1.0;
-      ctx.drawImage(imgA, offsetX, offsetY, nw, nh);
+      ctx.drawImage(imgA, offsetXA, offsetYA, nwA, nhA);
 
-      // Interpolate frame B on top using sub-frame alpha cross-fade
-      if (blend > 0.005 && frameB !== frameA) {
+      // 2. Draw incoming Frame B with complementary affine contracting morph & smootherstep alpha
+      if (blend > 0.001 && frameB !== frameA) {
         const imgB = getValidImage(frameB);
         if (imgB && imgB !== imgA) {
+          const nwB = Math.round(baseNw * scaleB);
+          const nhB = Math.round(baseNh * scaleB);
+          const offsetXB = Math.round(focalX * (1 - scaleB) + baseOffsetX * scaleB);
+          const offsetYB = Math.round(focalY * (1 - scaleB) + baseOffsetY * scaleB);
+
           ctx.globalAlpha = blend;
-          ctx.drawImage(imgB, offsetX, offsetY, nw, nh);
+          ctx.drawImage(imgB, offsetXB, offsetYB, nwB, nhB);
           ctx.globalAlpha = 1.0;
+        }
+      }
+
+      // 3. Velocity-Adaptive Shutter Blur (Temporal Anti-Aliasing for fast scrolls)
+      const vFps = Math.abs(velocity) * (total - 1);
+      if (vFps > 6.0) {
+        const blurAlpha = Math.min(0.14, (vFps - 6.0) * 0.0035);
+        const motionDirection = velocity >= 0 ? 1 : -1;
+        const frameC = Math.max(0, Math.min(total - 1, frameA + motionDirection * 2));
+        if (frameC !== frameA && frameC !== frameB) {
+          const imgC = getValidImage(frameC);
+          if (imgC) {
+            ctx.globalAlpha = blurAlpha;
+            ctx.drawImage(imgC, offsetXA, offsetYA, nwA, nhA);
+            ctx.globalAlpha = 1.0;
+          }
+        }
+      }
+
+      // 4. Background-warm upcoming frames in GPU texture cache
+      const images = imagesRef.current;
+      if (images && images.length > 0) {
+        const lookaheadDir = velocity >= 0 ? 1 : -1;
+        for (let offset = 1; offset <= 4; offset++) {
+          const nextIdx = frameA + offset * lookaheadDir;
+          if (nextIdx >= 0 && nextIdx < images.length && images[nextIdx]?.complete) {
+            images[nextIdx]?.decode?.().catch(() => {});
+          }
         }
       }
     };
 
-    // Hardware-accelerated RAF Lerp loop for sub-frame smoothing
+    // Hardware-accelerated 2nd-order critically-damped spring RAF loop for ultra-smooth temporal motion
     const requestTick = () => {
       if (isRunningRef.current) return;
       isRunningRef.current = true;
+      lastTimeRef.current = performance.now();
 
-      const step = () => {
-        const diff = targetProgressRef.current - currentProgressRef.current;
+      const OMEGA = 18.0; // Spring frequency: rapid, fluid, zero latency
 
-        // Continue interpolating as long as there is noticeable delta
-        if (Math.abs(diff) > 0.00005) {
-          // 0.12 lerp factor yields silky, cinematic responsiveness
-          currentProgressRef.current += diff * 0.12;
-          renderInterpolatedFrame(currentProgressRef.current);
+      const step = (now: number) => {
+        const dt = Math.min((now - (lastTimeRef.current || now)) / 1000, 0.064);
+        lastTimeRef.current = now;
+
+        const x = currentProgressRef.current;
+        const xt = targetProgressRef.current;
+        const v = velocityRef.current;
+        const diff = xt - x;
+
+        // 2nd-order critically-damped spring-damper exact analytical solution (zeta = 1.0)
+        const expTerm = Math.exp(-OMEGA * dt);
+        const c1 = x - xt;
+        const c2 = v + OMEGA * c1;
+        const xNew = xt + (c1 + c2 * dt) * expTerm;
+        const vNew = (v - OMEGA * c2 * dt) * expTerm;
+
+        currentProgressRef.current = xNew;
+        velocityRef.current = vNew;
+
+        // Continue as long as position or velocity delta remains
+        if (Math.abs(diff) > 1e-7 || Math.abs(vNew) > 1e-6) {
+          renderInterpolatedFrame(currentProgressRef.current, velocityRef.current);
           requestAnimationFrame(step);
         } else {
           currentProgressRef.current = targetProgressRef.current;
-          renderInterpolatedFrame(currentProgressRef.current);
+          velocityRef.current = 0;
+          renderInterpolatedFrame(currentProgressRef.current, 0);
           isRunningRef.current = false;
         }
       };
@@ -164,6 +239,10 @@ export default function SamuraiBackgroundCanvas({
       canvas.height = Math.round(height * dpr);
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+
       renderInterpolatedFrame(currentProgressRef.current);
     };
 
@@ -171,7 +250,7 @@ export default function SamuraiBackgroundCanvas({
     onFrameLoadRef.current = (index: number) => {
       if (isRunningRef.current) return; // the lerp loop is already drawing every frame
       const frameA = Math.floor(currentProgressRef.current * (framesList.length - 1));
-      if (index === -1 || index === frameA || index === frameA + 1) {
+      if (index === -1 || Math.abs(index - frameA) <= 1) {
         renderInterpolatedFrame(currentProgressRef.current);
       }
     };

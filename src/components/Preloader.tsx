@@ -57,8 +57,12 @@ export default function Preloader({ onLoaded }: PreloaderProps) {
     // 1. Immediately request the opening sequence
     for (let i = 0; i < INITIAL_THRESHOLD; i++) {
       const img = new Image();
+      img.decoding = "async";
       img.src = `${FRAMES_URL}/${framesList[i]}`;
-      img.onload = onFrameLoad;
+      img.onload = () => {
+        img.decode?.().catch(() => {});
+        onFrameLoad();
+      };
       img.onerror = onFrameLoad;
       images[i] = img;
     }
@@ -72,6 +76,7 @@ export default function Preloader({ onLoaded }: PreloaderProps) {
       const end = Math.min(totalFrames, nextIndex + BATCH_SIZE);
       for (let i = nextIndex; i < end; i++) {
         const img = new Image();
+        img.decoding = "async";
         img.src = `${FRAMES_URL}/${framesList[i]}`;
         img.onload = () => {
           loadedCount++;
