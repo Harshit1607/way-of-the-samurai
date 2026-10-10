@@ -4,264 +4,302 @@ import { useEffect, useRef } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import framesList from "../../public/frames.json";
+import type { FrameStore } from "@/lib/frameStore";
 
 // Source resolution of /frames_webp (see walkthrough.md)
 const FRAME_W = 1600;
 const FRAME_H = 900;
 
+// Decoded-bitmap window around the playhead. Drawing a frame that isn't decoded yet forces a
+// synchronous ~10ms WebP decode on the main thread, so frames are decoded off-thread
+// (createImageBitmap on a Blob) ahead of the playhead and only decoded frames are ever drawn.
+// A fast scroll covers far more frames per display refresh than can be decoded, so the decode
+// window spreads out with scroll speed (every Nth frame) and the canvas interpolates between
+// whichever decoded frames bracket the playhead.
+const DECODE_AHEAD = 16; // decode slots ahead of the playhead, in the scroll direction
+const DECODE_BEHIND = 6; // frames decoded behind it when scrolling slowly, for small reversals
+const MAX_STRIDE = 12; // widest spacing between decoded frames during fast scrolls
+const MAX_DECODED = 40; // bitmaps kept at once (~5MB each at 1440x900)
+const MAX_IN_FLIGHT = 6;
+const RESIZE_REDECODE_DELAY = 150; // ms; re-decode at the new canvas size once resizing settles
+
 interface SamuraiBackgroundCanvasProps {
-  cachedImages?: HTMLImageElement[];
+  frames: FrameStore | null;
 }
 
-export default function SamuraiBackgroundCanvas({
-  cachedImages,
-}: SamuraiBackgroundCanvasProps) {
+interface DecodedFrame {
+  bitmap: ImageBitmap;
+  generation: number; // canvas size the bitmap was decoded for
+}
+
+export default function SamuraiBackgroundCanvas({ frames }: SamuraiBackgroundCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const imagesRef = useRef<HTMLImageElement[]>([]);
-  
-  // Continuous sub-frame interpolation and 2nd-order spring physics state
+
+  // Scroll progress (0..1) the spring is chasing, and the spring's current position/velocity
   const targetProgressRef = useRef(0);
   const currentProgressRef = useRef(0);
   const velocityRef = useRef(0);
-  const isRunningRef = useRef(false);
-  const lastTimeRef = useRef(0);
-  // Redraws the resting frame if the frame that just loaded is on screen
-  const onFrameLoadRef = useRef<(index: number) => void>(() => {});
-  // Frames come from the Preloader's staged stream (first 100 eagerly, rest in batches).
-  // The canvas only draws on scroll/resize, so without this the first frame (and any frame that
-  // streams in after a fast scroll) never paints until the user scrolls.
-  useEffect(() => {
-    if (!cachedImages || cachedImages.length === 0) return;
-    imagesRef.current = cachedImages;
-
-    const listeners = cachedImages.map((img, i) => {
-      const onLoad = () => onFrameLoadRef.current(i);
-      img.addEventListener("load", onLoad);
-      return () => img.removeEventListener("load", onLoad);
-    });
-    // Some frames may have decoded (or come from cache) before these listeners existed
-    onFrameLoadRef.current(-1);
-
-    return () => listeners.forEach((off) => off());
-  }, [cachedImages]);
 
   useEffect(() => {
+    if (!frames) return;
     gsap.registerPlugin(ScrollTrigger);
 
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true }) || canvas.getContext("2d", { alpha: false });
+    // Not `desynchronized`: that bypasses the compositor's vsync and tears during continuous motion
+    const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) return;
 
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-    // Retrieve the closest valid, decoded image for a given index
-    const getValidImage = (index: number): HTMLImageElement | null => {
-      const images = imagesRef.current;
-      if (!images || images.length === 0) return null;
+    const total = framesList.length;
+    if (total <= 0) return;
 
-      const img = images[index];
-      if (img && img.complete && img.naturalWidth > 0) {
-        return img;
-      }
+    const decoded = new Map<number, DecodedFrame>();
+    const inFlight = new Set<number>();
+    const failed = new Set<number>();
+    let generation = 0;
+    let direction = 1; // 1 = scrolling forward through the film, -1 = backward
+    let stride = 1; // spacing of the decode window, grows with scroll speed
+    let disposed = false;
+    let rafId = 0;
+    let isRunning = false;
+    let lastTime = 0;
+    let resizeTimer: number | undefined;
 
-      // Backward search for nearest loaded frame
-      for (let i = index - 1; i >= 0; i--) {
-        if (images[i]?.complete && images[i]?.naturalWidth > 0) {
-          return images[i];
+    const playhead = () => Math.floor(Math.min(1, Math.max(0, currentProgressRef.current)) * (total - 1));
+
+    // Decoded frames on either side of `exactFrame`, nearest first; [-1, -1] if none
+    const bracket = (exactFrame: number): [number, number] => {
+      let lo = -1;
+      let hi = -1;
+      for (const index of decoded.keys()) {
+        if (index <= exactFrame) {
+          if (index > lo) lo = index;
+        } else if (hi === -1 || index < hi) {
+          hi = index;
         }
       }
-
-      // Forward search if early in sequence
-      for (let i = index + 1; i < images.length; i++) {
-        if (images[i]?.complete && images[i]?.naturalWidth > 0) {
-          return images[i];
-        }
-      }
-
-      return null;
+      return [lo, hi];
     };
-    /**
-     * Multi-Dimensional Temporal Optical Flow & Sub-Frame Morphing:
-     * 1. Quintic Smootherstep: C² continuous alpha cross-fade eliminating derivative boundary cusps.
-     * 2. Sub-Frame Affine Morphing: Micro-scales Frame A (+t) and Frame B (-(1-t)) around the samurai's
-     *    focal axis to lock geometric silhouettes in place during transitions.
-     * 3. Velocity-Adaptive Shutter Blur: Synthesizes temporal anti-aliasing during rapid scrubbing.
-     */
-    const renderInterpolatedFrame = (progress: number, velocity: number = 0) => {
-      const total = framesList.length;
-      if (total <= 0) return;
 
-      const clamped = Math.min(1, Math.max(0, progress));
-      const exactFrame = clamped * (total - 1);
-      const frameA = Math.floor(exactFrame);
-      const frameB = Math.min(total - 1, frameA + 1);
-      const rawBlend = exactFrame - frameA; // Fractional remainder 0.0 to 1.0
+    // ImageBitmap.close() frees the pixels synchronously (~1-2ms each), so evicted frames are
+    // released in idle time instead of inside a scroll frame
+    const releaseQueue: ImageBitmap[] = [];
+    let releaseScheduled = false;
+    const flushReleases = () => {
+      releaseScheduled = false;
+      releaseQueue.splice(0).forEach((bitmap) => bitmap.close());
+    };
+    const release = (bitmap: ImageBitmap) => {
+      releaseQueue.push(bitmap);
+      if (releaseScheduled) return;
+      releaseScheduled = true;
+      if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(flushReleases, { timeout: 1000 });
+      else setTimeout(flushReleases, 200);
+    };
 
-      // Quintic Smootherstep (6t^5 - 15t^4 + 10t^3): 0 first & second derivatives at integer boundaries
-      const blend = rawBlend * rawBlend * rawBlend * (rawBlend * (rawBlend * 6 - 15) + 10);
-
-      const imgA = getValidImage(frameA);
-      if (!imgA) return;
-
+    const decode = (index: number, blob: Blob) => {
+      inFlight.add(index);
+      const decodeGeneration = generation;
       const cw = canvas.width;
       const ch = canvas.height;
-      const iw = imgA.naturalWidth || 1920;
-      const ih = imgA.naturalHeight || 1080;
-
-      // Base cover viewport scaling
-      const baseScale = Math.max(cw / iw, ch / ih);
-      const baseNw = iw * baseScale;
-      const baseNh = ih * baseScale;
-      const baseOffsetX = (cw - baseNw) * 0.5;
-      const baseOffsetY = (ch - baseNh) * 0.5;
-
-      // Focal point of shot: Samurai center-of-mass (42% X, 50% Y)
-      const focalX = baseOffsetX + baseNw * 0.42;
-      const focalY = baseOffsetY + baseNh * 0.50;
-
-      // Subtle sub-frame affine expansion rate matching the camera dolly-in speed
-      const MORPH_RATE = 0.00065;
-      const scaleA = 1.0 + rawBlend * MORPH_RATE;
-      const scaleB = 1.0 - (1.0 - rawBlend) * MORPH_RATE;
-
-      // Calculate affine bounds for Frame A
-      const nwA = Math.round(baseNw * scaleA);
-      const nhA = Math.round(baseNh * scaleA);
-      const offsetXA = Math.round(focalX * (1 - scaleA) + baseOffsetX * scaleA);
-      const offsetYA = Math.round(focalY * (1 - scaleA) + baseOffsetY * scaleA);
-
-      // Clear only if transformed bounds expose canvas edges
-      if (offsetXA > 0 || offsetYA > 0 || nwA < cw || nhA < ch) {
-        ctx.fillStyle = "#050505";
-        ctx.fillRect(0, 0, cw, ch);
-      }
-
-      // 1. Draw base Frame A with affine forward-morphing
-      ctx.globalAlpha = 1.0;
-      ctx.drawImage(imgA, offsetXA, offsetYA, nwA, nhA);
-
-      // 2. Draw incoming Frame B with complementary affine contracting morph & smootherstep alpha
-      if (blend > 0.001 && frameB !== frameA) {
-        const imgB = getValidImage(frameB);
-        if (imgB && imgB !== imgA) {
-          const nwB = Math.round(baseNw * scaleB);
-          const nhB = Math.round(baseNh * scaleB);
-          const offsetXB = Math.round(focalX * (1 - scaleB) + baseOffsetX * scaleB);
-          const offsetYB = Math.round(focalY * (1 - scaleB) + baseOffsetY * scaleB);
-
-          ctx.globalAlpha = blend;
-          ctx.drawImage(imgB, offsetXB, offsetYB, nwB, nhB);
-          ctx.globalAlpha = 1.0;
-        }
-      }
-
-      // 3. Velocity-Adaptive Shutter Blur (Temporal Anti-Aliasing for fast scrolls)
-      const vFps = Math.abs(velocity) * (total - 1);
-      if (vFps > 6.0) {
-        const blurAlpha = Math.min(0.14, (vFps - 6.0) * 0.0035);
-        const motionDirection = velocity >= 0 ? 1 : -1;
-        const frameC = Math.max(0, Math.min(total - 1, frameA + motionDirection * 2));
-        if (frameC !== frameA && frameC !== frameB) {
-          const imgC = getValidImage(frameC);
-          if (imgC) {
-            ctx.globalAlpha = blurAlpha;
-            ctx.drawImage(imgC, offsetXA, offsetYA, nwA, nhA);
-            ctx.globalAlpha = 1.0;
+      // Crop to the "cover" region visible on this canvas and scale to canvas pixels, so drawing is a 1:1 blit
+      const scale = Math.max(cw / FRAME_W, ch / FRAME_H);
+      const sw = Math.min(FRAME_W, Math.round(cw / scale));
+      const sh = Math.min(FRAME_H, Math.round(ch / scale));
+      const options: ImageBitmapOptions =
+        sw === cw && sh === ch ? {} : { resizeWidth: cw, resizeHeight: ch, resizeQuality: "high" };
+      createImageBitmap(blob, Math.round((FRAME_W - sw) / 2), Math.round((FRAME_H - sh) / 2), sw, sh, options).then(
+        (bitmap) => {
+          inFlight.delete(index);
+          // Frames the playhead has already passed are no longer useful
+          if (disposed || (index - playhead()) * direction < -DECODE_BEHIND * stride) {
+            release(bitmap);
+          } else {
+            const previous = decoded.get(index);
+            if (previous) release(previous.bitmap);
+            decoded.set(index, { bitmap, generation: decodeGeneration });
+            // The spring loop redraws every tick; at rest, repaint in case this frame is on screen
+            if (!isRunning) render(currentProgressRef.current, 0);
           }
+          pump();
+        },
+        () => {
+          inFlight.delete(index);
+          failed.add(index);
+          pump();
+        }
+      );
+    };
+
+    // Decode the nearest missing frames (scroll direction first, every `stride`-th frame when
+    // scrolling fast), and release the least useful bitmaps once over the memory cap
+    const pump = () => {
+      if (disposed) return;
+      const center = playhead();
+
+      if (decoded.size > MAX_DECODED) {
+        // Frames behind the playhead go first, then the furthest ahead
+        const cost = (index: number) => {
+          const offset = (index - center) * direction;
+          return offset < 0 ? -offset * 3 : offset;
+        };
+        const byCost = [...decoded.keys()].sort((a, b) => cost(b) - cost(a));
+        for (const index of byCost.slice(0, decoded.size - MAX_DECODED)) {
+          release(decoded.get(index)!.bitmap);
+          decoded.delete(index);
         }
       }
 
-      // 4. Background-warm upcoming frames in GPU texture cache
-      const images = imagesRef.current;
-      if (images && images.length > 0) {
-        const lookaheadDir = velocity >= 0 ? 1 : -1;
-        for (let offset = 1; offset <= 4; offset++) {
-          const nextIdx = frameA + offset * lookaheadDir;
-          if (nextIdx >= 0 && nextIdx < images.length && images[nextIdx]?.complete) {
-            images[nextIdx]?.decode?.().catch(() => {});
-          }
-        }
+      // Slots sit on a stride-aligned grid so they stay put while the playhead moves
+      const gridBase = direction > 0 ? Math.floor(center / stride) : Math.ceil(center / stride);
+      const wanted: number[] = stride === 1 ? [center, center + direction] : [];
+      for (let k = 1; k <= DECODE_AHEAD; k++) {
+        wanted.push((gridBase + k * direction) * stride);
+        if (stride === 1 && k <= DECODE_BEHIND) wanted.push(center - k * direction);
+      }
+
+      for (const index of wanted) {
+        if (inFlight.size >= MAX_IN_FLIGHT) break;
+        if (index < 0 || index >= total || inFlight.has(index) || failed.has(index)) continue;
+        if (decoded.get(index)?.generation === generation) continue;
+        const blob = frames.blobs[index];
+        if (blob) decode(index, blob);
       }
     };
 
-    // Hardware-accelerated 2nd-order critically-damped spring RAF loop for ultra-smooth temporal motion
-    const requestTick = () => {
-      if (isRunningRef.current) return;
-      isRunningRef.current = true;
-      lastTimeRef.current = performance.now();
+    /**
+     * Draws the film at a fractional frame position with opacity `alpha`: a linear cross-fade of
+     * the two decoded frames that bracket it (neighbours when scrolling slowly, `stride` apart when
+     * fast). Linear weighting keeps the image changing at a constant rate under a constant scroll;
+     * an eased curve (smoothstep etc.) holds each frame and rushes between them, which reads as
+     * judder. Exact for alpha = 1; a close approximation for the faint shutter-blur layer.
+     * Returns false when nothing near `position` is decoded.
+     */
+    const drawAt = (position: number, alpha: number): boolean => {
+      const cw = canvas.width;
+      const ch = canvas.height;
+      const [lo, hi] = bracket(position);
+      if (lo === -1 && hi === -1) return false;
 
-      const OMEGA = 18.0; // Spring frequency: rapid, fluid, zero latency
+      let base = lo === -1 ? hi : lo;
+      let blend = 0;
+      if (lo !== -1 && hi !== -1) {
+        if (hi - lo <= 2 * MAX_STRIDE) blend = (position - lo) / (hi - lo);
+        else if (hi - position < position - lo) base = hi; // gap too wide to blend across: nearer frame
+      }
 
-      const step = (now: number) => {
-        const dt = Math.min((now - (lastTimeRef.current || now)) / 1000, 0.064);
-        lastTimeRef.current = now;
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(decoded.get(base)!.bitmap, 0, 0, cw, ch);
+      if (blend > 0.001) {
+        ctx.globalAlpha = alpha * blend;
+        ctx.drawImage(decoded.get(hi)!.bitmap, 0, 0, cw, ch);
+      }
+      return true;
+    };
 
-        const x = currentProgressRef.current;
-        const xt = targetProgressRef.current;
-        const v = velocityRef.current;
-        const diff = xt - x;
+    // During fast scrubs the film a little further along is layered in faintly as shutter blur;
+    // it is interpolated like the base so it fades continuously instead of popping per frame.
+    const render = (progress: number, velocity: number) => {
+      const exactFrame = Math.min(1, Math.max(0, progress)) * (total - 1);
+      if (!drawAt(exactFrame, 1)) return; // nothing decoded yet: keep whatever is on the canvas
 
-        // 2nd-order critically-damped spring-damper exact analytical solution (zeta = 1.0)
-        const expTerm = Math.exp(-OMEGA * dt);
-        const c1 = x - xt;
-        const c2 = v + OMEGA * c1;
-        const xNew = xt + (c1 + c2 * dt) * expTerm;
-        const vNew = (v - OMEGA * c2 * dt) * expTerm;
+      const framesPerSecond = Math.abs(velocity) * (total - 1);
+      if (framesPerSecond > 6) {
+        const lead = Math.max(2, stride) * (velocity >= 0 ? 1 : -1);
+        const ghost = Math.max(0, Math.min(total - 1, exactFrame + lead));
+        drawAt(ghost, Math.min(0.14, (framesPerSecond - 6) * 0.0035));
+      }
+      ctx.globalAlpha = 1;
+    };
 
+    // Critically-damped spring (zeta = 1), integrated exactly, chasing the scroll progress
+    const OMEGA = 18.0;
+    const step = (now: number) => {
+      // rAF timestamps are the frame's start time and can precede the performance.now() taken in
+      // requestTick; a negative dt would make the exponential grow and the spring overshoot
+      const dt = Math.min(Math.max(0, now - (lastTime || now)) / 1000, 0.064);
+      lastTime = now;
+
+      const x = currentProgressRef.current;
+      const xt = targetProgressRef.current;
+      const v = velocityRef.current;
+
+      const expTerm = Math.exp(-OMEGA * dt);
+      const c1 = x - xt;
+      const c2 = v + OMEGA * c1;
+      const xNew = xt + (c1 + c2 * dt) * expTerm;
+      const vNew = (v - OMEGA * c2 * dt) * expTerm;
+
+      if (Math.abs(xt - x) > 1e-7 || Math.abs(vNew) > 1e-6) {
         currentProgressRef.current = xNew;
         velocityRef.current = vNew;
+        // Frames the playhead crosses per 60Hz refresh sets how sparsely to decode ahead
+        stride = Math.min(MAX_STRIDE, Math.max(1, Math.ceil((Math.abs(vNew) * (total - 1)) / 60)));
+        pump();
+        render(xNew, vNew);
+        rafId = requestAnimationFrame(step);
+      } else {
+        currentProgressRef.current = xt;
+        velocityRef.current = 0;
+        stride = 1;
+        pump();
+        render(xt, 0);
+        isRunning = false;
+      }
+    };
 
-        // Continue as long as position or velocity delta remains
-        if (Math.abs(diff) > 1e-7 || Math.abs(vNew) > 1e-6) {
-          renderInterpolatedFrame(currentProgressRef.current, velocityRef.current);
-          requestAnimationFrame(step);
-        } else {
-          currentProgressRef.current = targetProgressRef.current;
-          velocityRef.current = 0;
-          renderInterpolatedFrame(currentProgressRef.current, 0);
-          isRunningRef.current = false;
-        }
-      };
+    const requestTick = () => {
+      if (isRunning) return;
+      isRunning = true;
+      lastTime = performance.now();
+      rafId = requestAnimationFrame(step);
+    };
 
-      requestAnimationFrame(step);
+    const updateTargetProgress = (progress: number) => {
+      const next = Math.min(1, Math.max(0, progress));
+      if (next !== currentProgressRef.current) direction = next > currentProgressRef.current ? 1 : -1;
+      targetProgressRef.current = next;
+      requestTick();
     };
 
     const handleResize = () => {
       const width = window.innerWidth;
       const height = window.innerHeight;
       // Never allocate more canvas pixels than the source frame can fill: past that it's the same
-      // upscaled image, just 2 full-screen drawImage calls per tick at up to 4x the fill cost.
+      // upscaled image at up to 4x the fill and decode cost.
       const coverScale = Math.max(width / FRAME_W, height / FRAME_H);
       const dpr = Math.min(window.devicePixelRatio || 1, 2, 1 / coverScale);
-      canvas.width = Math.round(width * dpr);
-      canvas.height = Math.round(height * dpr);
+      const nextWidth = Math.round(width * dpr);
+      const nextHeight = Math.round(height * dpr);
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
+      if (nextWidth === canvas.width && nextHeight === canvas.height) return;
 
+      canvas.width = nextWidth;
+      canvas.height = nextHeight;
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = "high";
+      ctx.fillStyle = "#050505";
+      ctx.fillRect(0, 0, nextWidth, nextHeight);
+      // Bitmaps decoded for the old size are stretched to fit until the re-decode lands
+      render(currentProgressRef.current, 0);
 
-      renderInterpolatedFrame(currentProgressRef.current);
-    };
-
-    // -1 means "just redraw"; otherwise only redraw when the loaded frame is one of the two being blended
-    onFrameLoadRef.current = (index: number) => {
-      if (isRunningRef.current) return; // the lerp loop is already drawing every frame
-      const frameA = Math.floor(currentProgressRef.current * (framesList.length - 1));
-      if (index === -1 || Math.abs(index - frameA) <= 1) {
-        renderInterpolatedFrame(currentProgressRef.current);
-      }
+      clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        generation++;
+        pump();
+      }, RESIZE_REDECODE_DELAY);
     };
 
     handleResize();
     window.addEventListener("resize", handleResize);
 
-    const updateTargetProgress = (progress: number) => {
-      targetProgressRef.current = Math.min(1, Math.max(0, progress));
-      requestTick();
-    };
+    // Frames stream in after mount; decode the ones that land near the playhead
+    const unsubscribe = frames.subscribe((index) => {
+      if (Math.abs(index - playhead()) <= DECODE_AHEAD * stride) pump();
+    });
+    pump();
 
     // 1. Direct Lenis smooth scroll event listener
     const handleLenisScroll = (e: Event) => {
@@ -284,12 +322,18 @@ export default function SamuraiBackgroundCanvas({
     });
 
     return () => {
-      onFrameLoadRef.current = () => {};
+      disposed = true;
+      cancelAnimationFrame(rafId);
+      clearTimeout(resizeTimer);
+      unsubscribe();
       window.removeEventListener("resize", handleResize);
       window.removeEventListener("lenis-scroll", handleLenisScroll);
       st.kill();
+      decoded.forEach((entry) => entry.bitmap.close());
+      decoded.clear();
+      flushReleases();
     };
-  }, []);
+  }, [frames]);
 
   return (
     /* Persistent Full-Viewport Canvas Background: Pure 60FPS Cross-Faded Film Shot */

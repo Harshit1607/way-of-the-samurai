@@ -13,14 +13,15 @@ To achieve the absolute pinnacle of fluid, continuous motion, we have extracted 
 - **Resolution & Optimization**: Scaled to 1600x900 WebP at quality 65, balancing razor-sharp clarity on retina displays with lightweight GPU texture bandwidth.
 - **Manifest**: [public/frames.json](file:///c:/Vs%20Code/Scroll/public/frames.json) updated with all 1,520 assets.
 
-### 2. Multi-Dimensional Temporal Optical Flow & Sub-Frame Morphing
-- [SamuraiBackgroundCanvas.tsx](file:///c:/Vs%20Code/Scroll/src/components/SamuraiBackgroundCanvas.tsx) executes a 3-layer temporal interpolation pipeline:
-  1. **Quintic Smootherstep ($C^2$ Blending)**: Uses Ken Perlin's quintic polynomial ($S_5(t) = 6t^5 - 15t^4 + 10t^3$) with 0 first and second derivatives at integer boundaries, eradicating slope cusps.
-  2. **Sub-Frame Affine Morphing (Optical Flow Alignment)**: Dynamically scales base Frame A ($1.0 + t \cdot 0.00065$) and incoming Frame B ($1.0 - (1-t) \cdot 0.00065$) about the samurai's focal axis ($(0.42, 0.50)$). The silhouettes lock together with sub-pixel precision, eliminating cross-fade double edges.
-  3. **Velocity-Adaptive Shutter Blur**: When scrub velocity exceeds 6 frames/sec, synthesizes physical camera shutter exposure via directional multi-frame lookahead blending, eliminating stroboscopic stepping during fast scrolls.
-  4. **GPU Lookahead Pre-Warming**: Pre-decodes upcoming frames ($+1$ to $+4$) into GPU texture memory via `HTMLImageElement.decode()` off the main thread.
+### 2. Sub-Frame Interpolation & Off-Thread Decoding
+- [SamuraiBackgroundCanvas.tsx](file:///c:/Vs%20Code/Scroll/src/components/SamuraiBackgroundCanvas.tsx) draws each tick as an interpolated blend of the two decoded frames that bracket the playhead:
+  1. **Linear Cross-Fade**: The later frame is layered over the earlier at opacity $t$ (the playhead's fractional position between them), so under a constant scroll the image changes at a constant rate. Eased curves such as smootherstep hold each frame and rush between them, which reads as judder.
+  2. **Velocity-Adaptive Shutter Blur**: Above 6 frames/sec of scrub speed, the film `max(2, stride)` frames ahead is layered in faintly (≤14%). It is interpolated the same way as the base, so it fades in continuously instead of popping whenever a specific frame is or isn't decoded.
+  3. **Off-Thread Decoded Frame Window**: Frames are kept as Blobs and decoded with `createImageBitmap` (off the main thread), cropped and scaled to the canvas size, up to 6 at a time. Only decoded frames are ever drawn. Drawing an undecoded `<img>` would force a ~10ms synchronous WebP decode on the main thread on every frame change, which was the source of the dropped frames.
+  4. **Speed-Adaptive Stride**: Slow scrolls decode every frame (16 ahead, 6 behind). Fast scrolls cross more frames per refresh than can be decoded, so the window decodes every Nth frame (N = frames crossed per 60Hz refresh, max 12) on a stable grid, and the blend interpolates across the gap instead of freezing. At most 40 bitmaps are kept; frames behind the playhead are evicted first, and `close()` runs in idle time.
+  - The canvas context is not `desynchronized`, so draws stay on the compositor's vsync and don't tear; the spring clamps `dt ≥ 0` because rAF timestamps can precede the `performance.now()` that started the loop.
 ### 3. Staged Fast-Boot Streaming Architecture
-- [Preloader.tsx](file:///c:/Vs%20Code/Scroll/src/components/Preloader.tsx) executes a two-phase loading pipeline:
+- [Preloader.tsx](file:///c:/Vs%20Code/Scroll/src/components/Preloader.tsx) fetches frames as Blobs into a shared [`FrameStore`](file:///c:/Vs%20Code/Scroll/src/lib/frameStore.ts) in two phases:
   - **Phase 1 (Instant Entrance)**: Prioritizes the first 100 frames (~5.5MB) to let users enter in ~400–500ms.
   - **Phase 2 (Background Streaming)**: Streams the remaining 1,420 frames in throttled batches of 30 every 40ms without dropping UI frames.
   - **Zero-Flicker Fallback**: If the user scrolls rapidly ahead of the streaming buffer, the canvas safely draws the nearest available frame, guaranteeing zero black flashes.

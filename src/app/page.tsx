@@ -5,6 +5,7 @@ import SmoothScroll from "@/components/SmoothScroll";
 import Preloader from "@/components/Preloader";
 import BackgroundEffects from "@/components/BackgroundEffects";
 import SamuraiBackgroundCanvas from "@/components/SamuraiBackgroundCanvas";
+import type { FrameStore } from "@/lib/frameStore";
 import ChapterRail from "@/components/ChapterRail";
 import HeroSection from "@/components/HeroSection";
 import HonourSection from "@/components/HonourSection";
@@ -15,22 +16,22 @@ import SilenceSection from "@/components/SilenceSection";
 import FinalSection from "@/components/FinalSection";
 
 export default function Home() {
-  const [cachedImages, setCachedImages] = useState<HTMLImageElement[]>([]);
+  const [frames, setFrames] = useState<FrameStore | null>(null);
 
-  const handleImagesLoaded = useCallback((images: HTMLImageElement[]) => {
-    setCachedImages(images);
+  const handleFramesReady = useCallback((store: FrameStore) => {
+    setFrames(store);
   }, []);
 
   return (
     <main className="relative min-h-screen w-full bg-ink text-bone overflow-x-clip">
       {/* Frame Preloading Curtain */}
-      <Preloader onLoaded={handleImagesLoaded} />
+      <Preloader onLoaded={handleFramesReady} />
 
       {/* Atmospheric Ember and Dust Particles */}
       <BackgroundEffects />
 
       {/* The Single Persistent Viewport Animation Background (One Continuous Shot with Dual-Frame Interpolation) */}
-      <SamuraiBackgroundCanvas cachedImages={cachedImages} />
+      <SamuraiBackgroundCanvas frames={frames} />
 
       {/* Chapter index + progress (landscape only) */}
       <ChapterRail />

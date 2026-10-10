@@ -2,12 +2,13 @@
 
 import { useEffect, useState, useRef } from "react";
 import framesList from "../../public/frames.json";
+import { FrameStore } from "@/lib/frameStore";
 
 // Frames live off-site in production (e.g. a GitHub Pages repo); locally they're served from /public
 const FRAMES_URL = (process.env.NEXT_PUBLIC_FRAMES_URL ?? "/frames_webp").replace(/\/$/, "");
 
 interface PreloaderProps {
-  onLoaded: (cachedImages: HTMLImageElement[]) => void;
+  onLoaded: (frames: FrameStore) => void;
 }
 
 export default function Preloader({ onLoaded }: PreloaderProps) {
@@ -23,7 +24,18 @@ export default function Preloader({ onLoaded }: PreloaderProps) {
   useEffect(() => {
     let loadedCount = 0;
     const totalFrames = framesList.length;
-    const images: HTMLImageElement[] = new Array(totalFrames);
+    const frames = new FrameStore(totalFrames);
+    const controller = new AbortController();
+
+    const loadFrame = (i: number, onSettled: () => void) => {
+      fetch(`${FRAMES_URL}/${framesList[i]}`, { signal: controller.signal })
+        .then((res) => (res.ok ? res.blob() : Promise.reject(new Error(res.statusText))))
+        .then((blob) => frames.set(i, blob))
+        .catch(() => {})
+        .finally(() => {
+          if (!controller.signal.aborted) onSettled();
+        });
+    };
 
     // Initial batch: First 100 frames for instant entry without blocking the UI
     const INITIAL_THRESHOLD = Math.min(100, totalFrames);
@@ -56,15 +68,7 @@ export default function Preloader({ onLoaded }: PreloaderProps) {
 
     // 1. Immediately request the opening sequence
     for (let i = 0; i < INITIAL_THRESHOLD; i++) {
-      const img = new Image();
-      img.decoding = "async";
-      img.src = `${FRAMES_URL}/${framesList[i]}`;
-      img.onload = () => {
-        img.decode?.().catch(() => {});
-        onFrameLoad();
-      };
-      img.onerror = onFrameLoad;
-      images[i] = img;
+      loadFrame(i, onFrameLoad);
     }
 
     // 2. Stream all remaining frames in steady concurrent background batches
@@ -75,16 +79,9 @@ export default function Preloader({ onLoaded }: PreloaderProps) {
       if (nextIndex >= totalFrames) return;
       const end = Math.min(totalFrames, nextIndex + BATCH_SIZE);
       for (let i = nextIndex; i < end; i++) {
-        const img = new Image();
-        img.decoding = "async";
-        img.src = `${FRAMES_URL}/${framesList[i]}`;
-        img.onload = () => {
+        loadFrame(i, () => {
           loadedCount++;
-        };
-        img.onerror = () => {
-          loadedCount++;
-        };
-        images[i] = img;
+        });
       }
       nextIndex = end;
       if (nextIndex < totalFrames) {
@@ -95,8 +92,8 @@ export default function Preloader({ onLoaded }: PreloaderProps) {
     // Kick off continuous background stream
     const streamTimer = setTimeout(streamNextBatch, 200);
 
-    // Share image reference array with canvas immediately
-    onLoadedRef.current?.(images);
+    // Share the frame store with the canvas immediately; it fills in as frames arrive
+    onLoadedRef.current?.(frames);
 
     // Safety timeout
     const timeout = setTimeout(() => {
@@ -106,6 +103,7 @@ export default function Preloader({ onLoaded }: PreloaderProps) {
     return () => {
       clearTimeout(timeout);
       clearTimeout(streamTimer);
+      controller.abort();
     };
   }, []);
 
